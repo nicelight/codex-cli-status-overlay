@@ -1,0 +1,5 @@
+repo = "https://github.com/openai/codex.git"
+ref = "rust-v0.130.0"
+commit = "58573da43ab697e8b79f152c53df4b42230395a8"
+codex_rs_dir = "codex-rs"
+

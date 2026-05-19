@@ -1,0 +1,225 @@
+diff --git a/codex-rs/tui/src/bottom_pane/status_line_setup.rs b/codex-rs/tui/src/bottom_pane/status_line_setup.rs
+index db789a1..bc1ed57 100644
+--- a/codex-rs/tui/src/bottom_pane/status_line_setup.rs
++++ b/codex-rs/tui/src/bottom_pane/status_line_setup.rs
+@@ -111,6 +111,9 @@ pub(crate) enum StatusLineItem {
+     /// Total output tokens generated.
+     TotalOutputTokens,
+ 
++    /// Number of context compactions observed by the TUI.
++    CompactCount,
++
+     /// Full session UUID.
+     SessionId,
+ 
+@@ -162,6 +165,7 @@ impl StatusLineItem {
+             StatusLineItem::UsedTokens => "Total tokens used in session (omitted when zero)",
+             StatusLineItem::TotalInputTokens => "Total input tokens used in session",
+             StatusLineItem::TotalOutputTokens => "Total output tokens used in session",
++            StatusLineItem::CompactCount => "Number of context compactions in this session",
+             StatusLineItem::SessionId => {
+                 "Current session identifier (omitted until session starts)"
+             }
+@@ -193,6 +197,7 @@ impl StatusLineItem {
+             StatusLineItem::UsedTokens => StatusSurfacePreviewItem::UsedTokens,
+             StatusLineItem::TotalInputTokens => StatusSurfacePreviewItem::TotalInputTokens,
+             StatusLineItem::TotalOutputTokens => StatusSurfacePreviewItem::TotalOutputTokens,
++            StatusLineItem::CompactCount => StatusSurfacePreviewItem::CompactCount,
+             StatusLineItem::SessionId => StatusSurfacePreviewItem::SessionId,
+             StatusLineItem::FastMode => StatusSurfacePreviewItem::FastMode,
+             StatusLineItem::RawOutput => StatusSurfacePreviewItem::RawOutput,
+@@ -440,6 +445,15 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn compact_count_is_selectable_id() {
++        assert_eq!(StatusLineItem::CompactCount.to_string(), "compact-count");
++        assert_eq!(
++            "compact-count".parse::<StatusLineItem>(),
++            Ok(StatusLineItem::CompactCount)
++        );
++    }
++
+     #[test]
+     fn parse_status_line_items_accepts_title_only_variants() {
+         let items = ["run-state", "task-progress"]
+diff --git a/codex-rs/tui/src/bottom_pane/status_line_style.rs b/codex-rs/tui/src/bottom_pane/status_line_style.rs
+index 07018bf..de31af2 100644
+--- a/codex-rs/tui/src/bottom_pane/status_line_style.rs
++++ b/codex-rs/tui/src/bottom_pane/status_line_style.rs
+@@ -41,7 +41,8 @@ impl StatusLineAccent {
+             | StatusLineItem::ContextWindowSize
+             | StatusLineItem::UsedTokens
+             | StatusLineItem::TotalInputTokens
+-            | StatusLineItem::TotalOutputTokens => Self::Usage,
++            | StatusLineItem::TotalOutputTokens
++            | StatusLineItem::CompactCount => Self::Usage,
+             StatusLineItem::FiveHourLimit | StatusLineItem::WeeklyLimit => Self::Limit,
+             StatusLineItem::CodexVersion | StatusLineItem::SessionId => Self::Metadata,
+             StatusLineItem::FastMode | StatusLineItem::RawOutput => Self::Mode,
+diff --git a/codex-rs/tui/src/bottom_pane/status_surface_preview.rs b/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
+index 1f23742..1636b0f 100644
+--- a/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
++++ b/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
+@@ -25,6 +25,7 @@ pub(crate) enum StatusSurfacePreviewItem {
+     UsedTokens,
+     TotalInputTokens,
+     TotalOutputTokens,
++    CompactCount,
+     SessionId,
+     FastMode,
+     RawOutput,
+@@ -54,6 +55,7 @@ impl StatusSurfacePreviewItem {
+             StatusSurfacePreviewItem::UsedTokens => "0 used",
+             StatusSurfacePreviewItem::TotalInputTokens => "0 in",
+             StatusSurfacePreviewItem::TotalOutputTokens => "0 out",
++            StatusSurfacePreviewItem::CompactCount => "0 compacted",
+             StatusSurfacePreviewItem::SessionId => "550e8400-e29b-41d4",
+             StatusSurfacePreviewItem::FastMode => "Fast on",
+             StatusSurfacePreviewItem::RawOutput => "raw output",
+@@ -83,6 +85,7 @@ impl StatusSurfacePreviewItem {
+             Self::UsedTokens,
+             Self::TotalInputTokens,
+             Self::TotalOutputTokens,
++            Self::CompactCount,
+             Self::SessionId,
+             Self::FastMode,
+             Self::RawOutput,
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 35d523a..34fea60 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -972,6 +972,8 @@ pub(crate) struct ChatWidget {
+     saw_plan_item_this_turn: bool,
+     // Latest `update_plan` checklist task counts for terminal-title rendering.
+     last_plan_progress: Option<(usize, usize)>,
++    // Number of context compactions observed by this TUI instance.
++    compact_count: u64,
+     // Incremental buffer for streamed plan content.
+     plan_delta_buffer: String,
+     // True while a plan item is streaming.
+@@ -5035,6 +5037,7 @@ impl ChatWidget {
+             saw_plan_update_this_turn: false,
+             saw_plan_item_this_turn: false,
+             last_plan_progress: None,
++            compact_count: 0,
+             plan_delta_buffer: String::new(),
+             plan_item_active: false,
+             turn_runtime_metrics: RuntimeMetricsSummary::default(),
+@@ -6143,6 +6146,8 @@ impl ChatWidget {
+                 self.exit_review_mode_after_item();
+             }
+             ThreadItem::ContextCompaction { .. } => {
++                self.compact_count = self.compact_count.saturating_add(1);
++                self.refresh_status_line();
+                 self.add_info_message("Context compacted".to_string(), /*hint*/ None);
+             }
+             ThreadItem::HookPrompt { .. } => {}
+diff --git a/codex-rs/tui/src/chatwidget/status_surfaces.rs b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+index 3095556..2689431 100644
+--- a/codex-rs/tui/src/chatwidget/status_surfaces.rs
++++ b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+@@ -639,6 +639,7 @@ impl ChatWidget {
+                 "{} out",
+                 format_tokens_compact(self.status_line_total_usage().output_tokens)
+             )),
++            StatusLineItem::CompactCount => Some(format!("{} compacted", self.compact_count)),
+             StatusLineItem::SessionId => self.thread_id.map(|id| id.to_string()),
+             StatusLineItem::FastMode => Some(
+                 if matches!(self.current_service_tier(), Some(ServiceTier::Fast)) {
+@@ -687,6 +688,7 @@ impl ChatWidget {
+             StatusSurfacePreviewItem::UsedTokens => StatusLineItem::UsedTokens,
+             StatusSurfacePreviewItem::TotalInputTokens => StatusLineItem::TotalInputTokens,
+             StatusSurfacePreviewItem::TotalOutputTokens => StatusLineItem::TotalOutputTokens,
++            StatusSurfacePreviewItem::CompactCount => StatusLineItem::CompactCount,
+             StatusSurfacePreviewItem::SessionId => StatusLineItem::SessionId,
+             StatusSurfacePreviewItem::FastMode => StatusLineItem::FastMode,
+             StatusSurfacePreviewItem::RawOutput => StatusLineItem::RawOutput,
+diff --git a/codex-rs/tui/src/chatwidget/tests/helpers.rs b/codex-rs/tui/src/chatwidget/tests/helpers.rs
+index 14f856b..5013cd5 100644
+--- a/codex-rs/tui/src/chatwidget/tests/helpers.rs
++++ b/codex-rs/tui/src/chatwidget/tests/helpers.rs
+@@ -300,6 +300,7 @@ pub(super) async fn make_chatwidget_manual(
+         saw_plan_update_this_turn: false,
+         saw_plan_item_this_turn: false,
+         last_plan_progress: None,
++        compact_count: 0,
+         plan_delta_buffer: String::new(),
+         plan_item_active: false,
+         turn_runtime_metrics: RuntimeMetricsSummary::default(),
+@@ -502,7 +503,7 @@ pub(super) fn make_token_info(total_tokens: i64, context_window: i64) -> TokenUs
+     }
+ }
+ 
+-fn thread_id(chat: &ChatWidget) -> String {
++pub(super) fn thread_id(chat: &ChatWidget) -> String {
+     chat.thread_id.map(|id| id.to_string()).unwrap_or_default()
+ }
+ 
+diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+index 89bb715..7ebc7e8 100644
+--- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
++++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+@@ -1427,6 +1427,60 @@ async fn status_line_legacy_context_usage_renders_context_used_percent() {
+     );
+ }
+ 
++#[tokio::test]
++async fn status_line_compact_count_updates_after_context_compaction() {
++    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
++    chat.thread_id = Some(ThreadId::new());
++    chat.config.tui_status_line = Some(vec!["compact-count".to_string()]);
++
++    chat.refresh_status_line();
++    assert_eq!(status_line_text(&chat), Some("0 compacted".to_string()));
++
++    chat.handle_server_notification(
++        ServerNotification::ItemCompleted(ItemCompletedNotification {
++            thread_id: thread_id(&chat),
++            turn_id: "turn-1".to_string(),
++            completed_at_ms: 0,
++            item: AppServerThreadItem::ContextCompaction {
++                id: "compact-1".to_string(),
++            },
++        }),
++        /*replay_kind*/ None,
++    );
++
++    assert_eq!(status_line_text(&chat), Some("1 compacted".to_string()));
++    let cells = drain_insert_history(&mut rx);
++    let rendered = lines_to_single_string(&cells[0]);
++    assert!(
++        rendered.contains("Context compacted"),
++        "compaction should keep existing history notice"
++    );
++}
++
++#[tokio::test]
++async fn status_line_compact_count_includes_replayed_context_compactions() {
++    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
++    chat.thread_id = Some(ThreadId::new());
++    chat.config.tui_status_line = Some(vec!["compact-count".to_string()]);
++
++    chat.replay_thread_item(
++        AppServerThreadItem::ContextCompaction {
++            id: "compact-1".to_string(),
++        },
++        "turn-1".to_string(),
++        ReplayKind::ThreadSnapshot,
++    );
++    chat.replay_thread_item(
++        AppServerThreadItem::ContextCompaction {
++            id: "compact-2".to_string(),
++        },
++        "turn-2".to_string(),
++        ReplayKind::ThreadSnapshot,
++    );
++
++    assert_eq!(status_line_text(&chat), Some("2 compacted".to_string()));
++}
++
+ #[tokio::test]
+ async fn status_line_branch_state_resets_when_git_branch_disabled() {
+     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
